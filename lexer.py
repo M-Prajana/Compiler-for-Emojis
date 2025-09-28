@@ -1,4 +1,4 @@
-# lexer.py
+# lexer.py — CWE-Compiler Emoji-Slang Lexer
 from tokens import Token, TokenType, TOKEN_MAP
 import re
 
@@ -25,54 +25,78 @@ class Lexer:
         return self.source[self.pos]
 
     def peek(self, length=1):
-        return self.source[self.pos:self.pos+length]
+        return self.source[self.pos:self.pos + length]
+
+    def add_token(self, type_, value, start_col=None):
+        col = start_col if start_col is not None else self.column
+        self.tokens.append(Token(type_, value, self.line, col))
 
     def tokenize(self):
+        max_token_len = max(len(k) for k in TOKEN_MAP.keys())
+
         while self.current_char() is not None:
-            if self.current_char().isspace():
+            char = self.current_char()
+
+            # Whitespace / newline
+            if char.isspace():
+                if char == "\n":
+                    self.add_token(TokenType.NEWLINE, "\\n", self.column)
+                else:
+                    self.add_token(TokenType.WHITESPACE, char, self.column)
                 self.advance()
                 continue
 
             # Comments
-            if self.peek(1) in ["📝", "/"]:
+            if self.peek(1) == "📝" or self.peek(2) == "//":
                 self.tokenize_comment()
                 continue
 
-            # Strings
-            if self.current_char() == '"':
+            # Multiline comment (/* ... */)
+            if self.peek(2) == "/*":
+                self.tokenize_multiline_comment()
+                continue
+
+            # String literal
+            if char == '"':
                 self.tokenize_string()
                 continue
 
-            # Numbers
-            if self.current_char().isdigit():
+            # Character literal
+            if char == "'":
+                self.tokenize_char()
+                continue
+
+            # Number (int / float)
+            if char.isdigit():
                 self.tokenize_number()
                 continue
 
-            # Multi-character token check (emoji combos or slang)
+            # Multi-character token (emoji/slang) — longest match first
             matched = False
-            for length in range(3, 0, -1):  # check up to 3-char tokens
+            for length in range(max_token_len, 0, -1):
                 candidate = self.peek(length)
                 if candidate in TOKEN_MAP:
-                    self.add_token(TOKEN_MAP[candidate], candidate)
+                    start_col = self.column
+                    self.add_token(TOKEN_MAP[candidate], candidate, start_col)
                     self.advance(length)
                     matched = True
                     break
             if matched:
                 continue
 
-            # Identifiers (variable names)
-            if re.match(r'[A-Za-z_]', self.current_char()):
+            # Identifiers / hybrid emojis
+            if re.match(r'[A-Za-z0-9_😀-🙏]', char):
                 self.tokenize_identifier()
                 continue
 
-            # Single-character symbols not in TOKEN_MAP
-            self.add_token(TokenType.COMMENT, self.current_char())  # fallback
+            # Unknown / trap token
+            print(f"Unknown token: {char} at {self.line}:{self.column}")  # debug
+            self.add_token(TokenType.UNKNOWN, char, self.column)
             self.advance()
 
+        # EOF token
+        self.tokens.append(Token(TokenType.EOF, None, self.line, self.column))
         return self.tokens
-
-    def add_token(self, type_, value):
-        self.tokens.append(Token(type_, value, self.line, self.column))
 
     def tokenize_number(self):
         start_col = self.column
@@ -85,34 +109,67 @@ class Lexer:
                     break
             num_str += self.current_char()
             self.advance()
-        self.tokens.append(Token("NUMBER", num_str, self.line, start_col))
+        token_type = TokenType.FLOAT if '.' in num_str else TokenType.NUMBER
+        self.add_token(token_type, num_str, start_col)
 
     def tokenize_string(self):
         start_col = self.column
         self.advance()  # skip opening "
         str_val = ""
+        escapes = {"n": "\n", "t": "\t", "\\": "\\", '"': '"'}
         while self.current_char() is not None and self.current_char() != '"':
-            str_val += self.current_char()
-            self.advance()
+            if self.current_char() == "\\" and self.peek(2)[1] in escapes:
+                esc_char = self.peek(2)[1]
+                str_val += escapes[esc_char]
+                self.advance(2)
+            else:
+                str_val += self.current_char()
+                self.advance()
         self.advance()  # skip closing "
-        self.tokens.append(Token("STRING", str_val, self.line, start_col))
+        self.add_token(TokenType.STRING, str_val, start_col)
+
+    def tokenize_char(self):
+        start_col = self.column
+        self.advance()  # skip opening '
+        char_val = self.current_char()
+        self.advance()
+        if self.current_char() == "'":
+            self.advance()
+            self.add_token(TokenType.CHAR, char_val, start_col)
+        else:
+            self.add_token(TokenType.UNKNOWN, char_val, start_col)
 
     def tokenize_identifier(self):
         start_col = self.column
         id_str = ""
-        while self.current_char() is not None and re.match(r'[A-Za-z0-9_😀]', self.current_char()):
+        while self.current_char() is not None and re.match(r'[A-Za-z0-9_😀-🙏]', self.current_char()):
             id_str += self.current_char()
             self.advance()
-        # Check if identifier is a keyword in TOKEN_MAP
-        token_type = TOKEN_MAP.get(id_str, TokenType.VAR)
-        self.tokens.append(Token(token_type, id_str, self.line, start_col))
+        token_type = TOKEN_MAP.get(id_str.lower(), TokenType.IDENTIFIER)
+        self.add_token(token_type, id_str, start_col)
 
     def tokenize_comment(self):
         start_col = self.column
+        comment_str = ""
         if self.peek(1) == "📝":
+            self.advance()  # skip marker
             while self.current_char() is not None and self.current_char() != "\n":
+                comment_str += self.current_char()
                 self.advance()
         elif self.peek(2) == "//":
+            self.advance(2)  # skip //
             while self.current_char() is not None and self.current_char() != "\n":
+                comment_str += self.current_char()
                 self.advance()
-        self.tokens.append(Token(TokenType.COMMENT, "comment", self.line, start_col))
+        self.add_token(TokenType.COMMENT, comment_str.strip(), start_col)
+
+    def tokenize_multiline_comment(self):
+        start_col = self.column
+        self.advance(2)  # skip /*
+        comment_str = ""
+        while self.current_char() is not None and self.peek(2) != "*/":
+            comment_str += self.current_char()
+            self.advance()
+        if self.peek(2) == "*/":
+            self.advance(2)
+        self.add_token(TokenType.COMMENT, comment_str.strip(), start_col)
